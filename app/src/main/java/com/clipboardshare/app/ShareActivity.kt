@@ -6,7 +6,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.widget.Toast
 
@@ -28,110 +30,178 @@ class ShareActivity : Activity() {
     private fun handleSend(intent: Intent) {
         val mimeType = intent.type ?: ""
 
-        if (mimeType == "text/plain" && intent.hasExtra(Intent.EXTRA_TEXT)) {
+        // Plain text
+        if (mimeType == "text/plain") {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!text.isNullOrEmpty()) {
-                copyToClipboard(text, "Текст скопирован!")
+                copyToClipboard(text, "✅ Текст скопирован!")
                 return
             }
         }
 
-        val fileUri: Uri? = intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        // File URI
+        val fileUri = getStreamUri(intent)
         if (fileUri != null) {
-            val result = processFile(fileUri, mimeType)
+            val result = processUri(fileUri, mimeType)
             copyToClipboard(result.text, result.message)
-        } else {
-            val fallbackText = intent.getStringExtra(Intent.EXTRA_TEXT)
-            if (!fallbackText.isNullOrEmpty()) {
-                copyToClipboard(fallbackText, "Текст скопирован!")
-            } else {
-                showToast("❌ Нет данных для копирования")
-                finish()
-            }
+            return
         }
+
+        // Fallback to EXTRA_TEXT
+        val fallback = intent.getStringExtra(Intent.EXTRA_TEXT)
+        if (!fallback.isNullOrEmpty()) {
+            copyToClipboard(fallback, "✅ Текст скопирован!")
+            return
+        }
+
+        showToast("❌ Нет данных для копирования")
+        finish()
     }
 
     private fun handleSendMultiple(intent: Intent) {
-        val texts = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
-        if (texts != null && texts.isNotEmpty()) {
-            val combined = texts.filter { !it.isNullOrBlank() }.joinToString("\n\n---\n\n")
-            if (combined.isNotBlank()) {
-                copyToClipboard(combined, "✅ Скопировано текстовых фрагментов: ${texts.size}")
-                return
+        // Collect all URIs from every possible source
+        val uris = mutableListOf<Uri>()
+
+        // 1) EXTRA_STREAM (ArrayList<Uri>) — works on all Android versions
+        val streamUris = getStreamUriList(intent)
+        uris.addAll(streamUris)
+
+        // 2) ClipData — backup source used by some apps/launchers
+        if (uris.isEmpty()) {
+            val clip = intent.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) {
+                    val item = clip.getItemAt(i)
+                    item?.uri?.let { uris.add(it) }
+                }
             }
         }
 
-        val uris: ArrayList<Uri>? = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-        if (uris != null && uris.isNotEmpty()) {
-            val stringBuilder = java.lang.StringBuilder()
-            var processedCount = 0
-            for (uri in uris) {
-                val mimeType = contentResolver.getType(uri) ?: intent.type ?: "*/*"
-                val result = processFile(uri, mimeType)
-                
-                val textToAppend = result.text.takeIf { it.isNotBlank() } ?: uri.toString()
-                
-                if (processedCount > 0) {
-                    stringBuilder.append("\n\n---\n\n")
+        if (uris.isEmpty()) {
+            // Maybe it's text items
+            val texts = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
+            if (texts != null && texts.isNotEmpty()) {
+                val combined = texts.filter { !it.isNullOrBlank() }.joinToString("\n\n---\n\n")
+                if (combined.isNotBlank()) {
+                    copyToClipboard(combined, "✅ Скопировано: ${texts.size} фрагм.")
+                    return
                 }
-                stringBuilder.append(textToAppend)
-                processedCount++
             }
-            copyToClipboard(stringBuilder.toString(), "✅ Скопировано файлов: $processedCount")
-        } else {
             showToast("❌ Нет файлов для копирования")
             finish()
+            return
+        }
+
+        val sb = StringBuilder()
+        var count = 0
+        for (uri in uris) {
+            val mime = contentResolver.getType(uri) ?: intent.type ?: "*/*"
+            val result = processUri(uri, mime)
+            val textToAppend = result.text.takeIf { it.isNotBlank() } ?: uriToFallbackString(uri)
+            if (count > 0) sb.append("\n\n---\n\n")
+            sb.append(textToAppend)
+            count++
+        }
+
+        copyToClipboard(sb.toString(), "✅ Скопировано файлов: $count")
+    }
+
+    // ─── URI helpers ────────────────────────────────────────────────────────────
+
+    @Suppress("DEPRECATION")
+    private fun getStreamUri(intent: Intent): Uri? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
         }
     }
+
+    @Suppress("DEPRECATION", "UNCHECKED_CAST")
+    private fun getStreamUriList(intent: Intent): List<Uri> {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
+            } else {
+                (intent.getParcelableArrayListExtra<android.os.Parcelable>(Intent.EXTRA_STREAM)
+                    ?.filterIsInstance<Uri>()) ?: emptyList()
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // ─── File processing ─────────────────────────────────────────────────────────
 
     private data class ProcessResult(val text: String, val message: String)
 
-    private fun processFile(uri: Uri, mimeType: String): ProcessResult {
-        var fileName = getDisplayName(uri)
-        if (fileName.isNullOrEmpty()) fileName = uri.lastPathSegment
-        if (fileName.isNullOrEmpty()) fileName = uri.toString()
+    private fun processUri(uri: Uri, mimeType: String): ProcessResult {
+        val name = getBestName(uri)
 
-        try {
-            val isTextFile = isTextMimeType(mimeType) || isTextByExtension(uri)
+        return try {
+            val isText = isTextMimeType(mimeType) || isTextByExtension(name)
 
-            if (!isTextFile) {
-                return ProcessResult(fileName!!, "📁 Имя файла скопировано!")
+            if (!isText) {
+                return ProcessResult(name, "📁 Имя файла скопировано!")
             }
 
-            val content = contentResolver.openInputStream(uri)?.use { stream ->
-                stream.bufferedReader(Charsets.UTF_8).readText()
-            }
+            val content = contentResolver.openInputStream(uri)?.use { it.bufferedReader(Charsets.UTF_8).readText() }
 
-            if (content != null) {
-                if (content.length > 1_000_000) {
-                    return ProcessResult(fileName!!, "⚠️ Файл слишком большой, скопировано имя")
-                } else if (content.isBlank()) {
-                    return ProcessResult(fileName!!, "⚠️ Файл пуст, скопировано имя")
-                } else {
-                    return ProcessResult(content, "✅ Содержимое файла скопировано!\n(${content.length} символов)")
-                }
-            } else {
-                return ProcessResult(fileName!!, "❌ Не удалось прочитать файл, скопировано имя")
+            when {
+                content == null -> ProcessResult(name, "❌ Не удалось прочитать файл")
+                content.length > 1_000_000 -> ProcessResult(name, "⚠️ Файл слишком большой, скопировано имя")
+                content.isBlank() -> ProcessResult(name, "⚠️ Файл пуст, скопировано имя")
+                else -> ProcessResult(content, "✅ Содержимое скопировано (${content.length} симв.)")
             }
         } catch (e: Exception) {
-            return ProcessResult(fileName!!, "⚠️ Ошибка чтения, скопировано имя")
+            ProcessResult(name, "⚠️ Ошибка: скопировано имя")
         }
     }
 
-    private fun isTextMimeType(mimeType: String): Boolean {
-        return mimeType.startsWith("text/") ||
-                mimeType == "application/json" ||
-                mimeType == "application/xml" ||
-                mimeType == "application/javascript" ||
-                mimeType == "application/x-sh" ||
-                mimeType == "application/x-python" ||
-                mimeType == "application/x-yaml" ||
-                mimeType == "application/toml" ||
-                mimeType == "application/sql"
+    /** Returns the best human-readable name/path we can get for the URI. Never blank. */
+    private fun getBestName(uri: Uri): String {
+        // 1) OpenableColumns.DISPLAY_NAME
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2) MediaStore._DISPLAY_NAME / _DATA
+        try {
+            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    for (col in listOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATA)) {
+                        val idx = c.getColumnIndex(col)
+                        if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it.substringAfterLast('/') }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 3) lastPathSegment
+        uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let { return it }
+
+        // 4) toString as last resort
+        return uri.toString()
     }
 
-    private fun isTextByExtension(uri: Uri): Boolean {
-        val path = getDisplayName(uri) ?: uri.path ?: uri.lastPathSegment ?: return false
+    private fun uriToFallbackString(uri: Uri): String = getBestName(uri)
+
+    // ─── MIME / extension helpers ────────────────────────────────────────────────
+
+    private fun isTextMimeType(mimeType: String) =
+        mimeType.startsWith("text/") ||
+        mimeType in setOf(
+            "application/json", "application/xml", "application/javascript",
+            "application/x-sh", "application/x-python", "application/x-yaml",
+            "application/toml", "application/sql"
+        )
+
+    private fun isTextByExtension(name: String): Boolean {
         val textExtensions = setOf(
             "txt", "md", "markdown", "log", "csv", "tsv",
             "json", "xml", "html", "htm", "css", "js", "ts",
@@ -142,36 +212,15 @@ class ShareActivity : Activity() {
             "sql", "graphql", "vue", "jsx", "tsx", "env",
             "gitignore", "dockerfile", "makefile", "gradle"
         )
-        val ext = path.substringAfterLast('.', "").lowercase()
+        val ext = name.substringAfterLast('.', "").lowercase()
         return ext in textExtensions
     }
 
-    private fun getDisplayName(uri: Uri): String? {
-        try {
-            if (uri.scheme == "content") {
-                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (idx >= 0) {
-                            val name = cursor.getString(idx)
-                            if (!name.isNullOrEmpty()) return name
-                        }
-                    }
-                }
-            } else if (uri.scheme == "file") {
-                val name = uri.lastPathSegment
-                if (!name.isNullOrEmpty()) return name
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return null
-    }
+    // ─── Clipboard ───────────────────────────────────────────────────────────────
 
     private fun copyToClipboard(text: String, message: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("ClipboardShare", text)
-        clipboard.setPrimaryClip(clip)
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("ClipboardShare", text))
         showToast(message)
         finish()
     }
