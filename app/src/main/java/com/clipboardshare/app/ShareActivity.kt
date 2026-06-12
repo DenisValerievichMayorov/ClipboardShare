@@ -97,7 +97,7 @@ class ShareActivity : Activity() {
         for (uri in uris) {
             val mime = contentResolver.getType(uri) ?: intent.type ?: "*/*"
             val result = processUri(uri, mime)
-            val textToAppend = result.text.takeIf { it.isNotBlank() } ?: uriToFallbackString(uri)
+            val textToAppend = result.text.takeIf { it.isNotBlank() } ?: uriToFallbackString(uri, count)
             if (count > 0) sb.append("\n\n---\n\n")
             sb.append(textToAppend)
             count++
@@ -159,7 +159,7 @@ class ShareActivity : Activity() {
     }
 
     /** Returns the best human-readable name/path we can get for the URI. Never blank. */
-    private fun getBestName(uri: Uri): String {
+    private fun getBestName(uri: Uri, index: Int = -1): String {
         // 1) OpenableColumns.DISPLAY_NAME
         try {
             contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
@@ -170,26 +170,49 @@ class ShareActivity : Activity() {
             }
         } catch (_: Exception) {}
 
-        // 2) MediaStore._DISPLAY_NAME / _DATA
+        // 2) MediaStore DATA column (real file path)
         try {
-            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                 if (c.moveToFirst()) {
                     for (col in listOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATA)) {
                         val idx = c.getColumnIndex(col)
-                        if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it.substringAfterLast('/') }
+                        if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let {
+                            return it.substringAfterLast('/')
+                        }
                     }
                 }
             }
         } catch (_: Exception) {}
 
-        // 3) lastPathSegment
-        uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let { return it }
+        // 3) URI last path segment (decoded)
+        try {
+            uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let {
+                val decoded = java.net.URLDecoder.decode(it, "UTF-8")
+                // Often the segment is like "image:12345" — take part after colon
+                val name = decoded.substringAfterLast('/').substringAfterLast(':')
+                if (name.isNotBlank()) return name
+                if (decoded.isNotBlank()) return decoded
+            }
+        } catch (_: Exception) {}
 
-        // 4) toString as last resort
-        return uri.toString()
+        // 4) URI path decoded
+        try {
+            uri.path?.takeIf { it.isNotBlank() }?.let {
+                val name = it.substringAfterLast('/')
+                if (name.isNotBlank()) return name
+            }
+        } catch (_: Exception) {}
+
+        // 5) Entire URI string
+        try {
+            uri.toString().takeIf { it.isNotBlank() }?.let { return it }
+        } catch (_: Exception) {}
+
+        // 6) Absolute last resort — numbered placeholder
+        return if (index >= 0) "Файл ${index + 1}" else "Файл"
     }
 
-    private fun uriToFallbackString(uri: Uri): String = getBestName(uri)
+    private fun uriToFallbackString(uri: Uri, index: Int = -1): String = getBestName(uri, index)
 
     // ─── MIME / extension helpers ────────────────────────────────────────────────
 
