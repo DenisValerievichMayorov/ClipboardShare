@@ -103,7 +103,7 @@ class ShareActivity : Activity() {
             count++
         }
 
-        copyToClipboard(sb.toString(), "✅ Скопировано путей: $count (V6)")
+        copyToClipboard(sb.toString(), "✅ Скопировано путей: $count (V7)")
     }
 
     // ─── URI helpers ────────────────────────────────────────────────────────────
@@ -163,6 +163,26 @@ class ShareActivity : Activity() {
                     input.copyTo(output)
                 }
             }
+
+            if (destFile.exists()) {
+                if (destFile.length() == 0L) {
+                    showToast("⚠️ Внимание: Файл ${destFile.name} пустой (0 байт) из источника!")
+                } else {
+                    // Check magic bytes for PDF
+                    try {
+                        val magic = ByteArray(4)
+                        java.io.FileInputStream(destFile).use { it.read(magic) }
+                        if (magic[0] == 0x25.toByte() && magic[1] == 0x50.toByte() && magic[2] == 0x44.toByte() && magic[3] == 0x46.toByte()) {
+                            if (!destFile.name.endsWith(".pdf", true)) {
+                                val newFile = java.io.File(appDir, destFile.nameWithoutExtension + ".pdf")
+                                destFile.renameTo(newFile)
+                                return newFile
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+
             return destFile
         } catch (e: Exception) {
             e.printStackTrace()
