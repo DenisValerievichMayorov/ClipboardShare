@@ -8,8 +8,8 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.clipboardshare.app2"
-        minSdk = 21
+        applicationId = "com.clipboardshare.app3"
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
