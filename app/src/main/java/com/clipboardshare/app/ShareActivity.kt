@@ -97,29 +97,13 @@ class ShareActivity : Activity() {
         for (uri in uris) {
             val mime = contentResolver.getType(uri) ?: intent.type ?: "*/*"
 
-            // DEBUG: collect all raw info about URI
-            val debugInfo = buildString {
-                append("[URI] ${uri}\n")
-                append("[scheme] ${uri.scheme}\n")
-                append("[path] ${uri.path}\n")
-                append("[lastSeg] ${uri.lastPathSegment}\n")
-                append("[mime] $mime\n")
-                try {
-                    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                        if (c.moveToFirst()) {
-                            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                            append("[DISPLAY_NAME] ${if (idx >= 0) c.getString(idx) else "no column"}\n")
-                        } else append("[DISPLAY_NAME] cursor empty\n")
-                    } ?: append("[DISPLAY_NAME] query returned null\n")
-                } catch (e: Exception) { append("[DISPLAY_NAME] exception: ${e.message}\n") }
-            }
-
+            val result = processUri(uri, mime)
             if (count > 0) sb.append("\n\n---\n\n")
-            sb.append(debugInfo)
+            sb.append(result.text)
             count++
         }
 
-        copyToClipboard(sb.toString(), "✅ Скопировано путей: $count (V4)")
+        copyToClipboard(sb.toString(), "✅ Скопировано путей: $count (V6)")
     }
 
     // ─── URI helpers ────────────────────────────────────────────────────────────
