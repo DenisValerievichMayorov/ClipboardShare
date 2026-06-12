@@ -81,9 +81,9 @@ class ShareActivity : Activity() {
             // Maybe it's text items
             val texts = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
             if (texts != null && texts.isNotEmpty()) {
-                val combined = texts.filter { !it.isNullOrBlank() }.joinToString("\n\n---\n\n")
+                val combined = texts.filter { !it.isNullOrBlank() }.map { "[TEXT] $it" }.joinToString("\n\n---\n\n")
                 if (combined.isNotBlank()) {
-                    copyToClipboard(combined, "✅ Скопировано: ${texts.size} фрагм.")
+                    copyToClipboard(combined, "✅ Скопировано: ${texts.size} текст. (V4)")
                     return
                 }
             }
@@ -119,29 +119,24 @@ class ShareActivity : Activity() {
             count++
         }
 
-        copyToClipboard(sb.toString(), "✅ Скопировано файлов: $count")
+        copyToClipboard(sb.toString(), "✅ Скопировано путей: $count (V4)")
     }
 
     // ─── URI helpers ────────────────────────────────────────────────────────────
 
     @Suppress("DEPRECATION")
     private fun getStreamUri(intent: Intent): Uri? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        return try {
+            intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+        } catch (e: Exception) {
+            null
         }
     }
 
-    @Suppress("DEPRECATION", "UNCHECKED_CAST")
+    @Suppress("DEPRECATION")
     private fun getStreamUriList(intent: Intent): List<Uri> {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
-            } else {
-                (intent.getParcelableArrayListExtra<android.os.Parcelable>(Intent.EXTRA_STREAM)
-                    ?.filterIsInstance<Uri>()) ?: emptyList()
-            }
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
         } catch (e: Exception) {
             emptyList()
         }
