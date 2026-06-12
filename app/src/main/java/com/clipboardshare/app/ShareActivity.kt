@@ -152,108 +152,67 @@ class ShareActivity : Activity() {
     private data class ProcessResult(val text: String, val message: String)
 
     private fun processUri(uri: Uri, mimeType: String): ProcessResult {
-        val name = getBestName(uri)
-
-        return try {
-            val isText = isTextMimeType(mimeType) || isTextByExtension(name)
-
-            if (!isText) {
-                return ProcessResult(name, "📁 Имя файла скопировано!")
-            }
-
-            val content = contentResolver.openInputStream(uri)?.use { it.bufferedReader(Charsets.UTF_8).readText() }
-
-            when {
-                content == null -> ProcessResult(name, "❌ Не удалось прочитать файл")
-                content.length > 1_000_000 -> ProcessResult(name, "⚠️ Файл слишком большой, скопировано имя")
-                content.isBlank() -> ProcessResult(name, "⚠️ Файл пуст, скопировано имя")
-                else -> ProcessResult(content, "✅ Содержимое скопировано (${content.length} симв.)")
-            }
-        } catch (e: Exception) {
-            ProcessResult(name, "⚠️ Ошибка: скопировано имя")
-        }
+        val path = getRealAbsolutePath(uri)
+        return ProcessResult(path, "✅ Путь скопирован")
     }
 
-    /** Returns the best human-readable name/path we can get for the URI. Never blank. */
-    private fun getBestName(uri: Uri, index: Int = -1): String {
-        // 1) OpenableColumns.DISPLAY_NAME
+    private fun getRealAbsolutePath(uri: Uri): String {
+        // 1) File scheme
+        if (uri.scheme == "file") {
+            return uri.path ?: uri.toString()
+        }
+
+        // 2) DocumentsContract (SAF) - e.g. from standard file managers
         try {
-            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
+            if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
+                val docId = android.provider.DocumentsContract.getDocumentId(uri)
+                val split = docId.split(":")
+                if (split.size >= 2) {
+                    val type = split[0]
+                    val id = split[1]
+
+                    if ("primary".equals(type, ignoreCase = true)) {
+                        return android.os.Environment.getExternalStorageDirectory().toString() + "/" + id
+                    } else if ("raw".equals(type, ignoreCase = true)) {
+                        return id
+                    } else {
+                        // Might be SD card or other volume, harder to map reliably without more context,
+                        // but usually "primary" is the internal storage (/storage/emulated/0).
+                    }
+                } else {
+                    // Sometimes docId is just the raw path
+                    if (docId.startsWith("/")) return docId
                 }
             }
         } catch (_: Exception) {}
 
-        // 2) MediaStore DATA column (real file path)
+        // 3) MediaStore _data column
         try {
-            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
                 if (c.moveToFirst()) {
-                    for (col in listOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATA)) {
-                        val idx = c.getColumnIndex(col)
-                        if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let {
-                            return it.substringAfterLast('/')
-                        }
+                    val idx = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    if (idx >= 0) {
+                        val path = c.getString(idx)
+                        if (!path.isNullOrBlank()) return path
                     }
                 }
             }
         } catch (_: Exception) {}
-
-        // 3) URI last path segment (decoded)
+        
+        // 4) Fallback to decoded URI path if it looks like a file path
         try {
-            uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let {
-                val decoded = java.net.URLDecoder.decode(it, "UTF-8")
-                // Often the segment is like "image:12345" — take part after colon
-                val name = decoded.substringAfterLast('/').substringAfterLast(':')
-                if (name.isNotBlank()) return name
-                if (decoded.isNotBlank()) return decoded
+            val decodedPath = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
+            if (decodedPath.contains("/storage/")) {
+                val extracted = "/storage/" + decodedPath.substringAfter("/storage/")
+                return extracted
             }
         } catch (_: Exception) {}
 
-        // 4) URI path decoded
-        try {
-            uri.path?.takeIf { it.isNotBlank() }?.let {
-                val name = it.substringAfterLast('/')
-                if (name.isNotBlank()) return name
-            }
-        } catch (_: Exception) {}
-
-        // 5) Entire URI string
-        try {
-            uri.toString().takeIf { it.isNotBlank() }?.let { return it }
-        } catch (_: Exception) {}
-
-        // 6) Absolute last resort — numbered placeholder
-        return if (index >= 0) "Файл ${index + 1}" else "Файл"
+        // 5) Absolute last fallback: the original URI string
+        return uri.toString()
     }
 
-    private fun uriToFallbackString(uri: Uri, index: Int = -1): String = getBestName(uri, index)
-
-    // ─── MIME / extension helpers ────────────────────────────────────────────────
-
-    private fun isTextMimeType(mimeType: String) =
-        mimeType.startsWith("text/") ||
-        mimeType in setOf(
-            "application/json", "application/xml", "application/javascript",
-            "application/x-sh", "application/x-python", "application/x-yaml",
-            "application/toml", "application/sql"
-        )
-
-    private fun isTextByExtension(name: String): Boolean {
-        val textExtensions = setOf(
-            "txt", "md", "markdown", "log", "csv", "tsv",
-            "json", "xml", "html", "htm", "css", "js", "ts",
-            "py", "rb", "java", "kt", "kts", "go", "rs",
-            "c", "cpp", "h", "hpp", "cs", "php", "swift",
-            "sh", "bash", "zsh", "fish", "yaml", "yml",
-            "toml", "ini", "cfg", "conf", "properties",
-            "sql", "graphql", "vue", "jsx", "tsx", "env",
-            "gitignore", "dockerfile", "makefile", "gradle"
-        )
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return ext in textExtensions
-    }
+    private fun uriToFallbackString(uri: Uri, index: Int = -1): String = getRealAbsolutePath(uri)
 
     // ─── Clipboard ───────────────────────────────────────────────────────────────
 
