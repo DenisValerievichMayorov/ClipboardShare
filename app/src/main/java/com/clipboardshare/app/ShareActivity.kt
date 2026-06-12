@@ -147,41 +147,63 @@ class ShareActivity : Activity() {
     private data class ProcessResult(val text: String, val message: String)
 
     private fun processUri(uri: Uri, mimeType: String): ProcessResult {
-        val path = getRealAbsolutePath(uri)
-        return ProcessResult(path, "✅ Путь скопирован")
+        return try {
+            val name = getBestName(uri)
+            val copiedFile = copyFileToDownloads(uri, name)
+            if (copiedFile != null) {
+                ProcessResult(copiedFile.absolutePath, "✅ Файл скопирован для Termux")
+            } else {
+                // If copying fails, fallback to real path extraction
+                val path = getRealAbsolutePath(uri)
+                ProcessResult(path, "⚠️ Не удалось скопировать, возвращён путь")
+            }
+        } catch (e: Exception) {
+            ProcessResult(uri.toString(), "❌ Ошибка")
+        }
     }
 
-    private fun getRealAbsolutePath(uri: Uri): String {
-        // 1) File scheme
-        if (uri.scheme == "file") {
-            return uri.path ?: uri.toString()
-        }
-
-        // 2) DocumentsContract (SAF) - e.g. from standard file managers
+    private fun copyFileToDownloads(uri: Uri, fileName: String): java.io.File? {
         try {
-            if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
-                val docId = android.provider.DocumentsContract.getDocumentId(uri)
-                val split = docId.split(":")
-                if (split.size >= 2) {
-                    val type = split[0]
-                    val id = split[1]
+            val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val appDir = java.io.File(downloadsDir, "ClipboardShare")
+            if (!appDir.exists()) {
+                appDir.mkdirs()
+            }
 
-                    if ("primary".equals(type, ignoreCase = true)) {
-                        return android.os.Environment.getExternalStorageDirectory().toString() + "/" + id
-                    } else if ("raw".equals(type, ignoreCase = true)) {
-                        return id
-                    } else {
-                        // Might be SD card or other volume, harder to map reliably without more context,
-                        // but usually "primary" is the internal storage (/storage/emulated/0).
-                    }
-                } else {
-                    // Sometimes docId is just the raw path
-                    if (docId.startsWith("/")) return docId
+            // Sanitize filename to prevent path traversal
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9.\\-_ ()]"), "_")
+            val destFile = java.io.File(appDir, safeName)
+
+            contentResolver.openInputStream(uri)?.use { input ->
+                java.io.FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            return destFile
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    /** Returns the best human-readable name for the URI. Never blank. */
+    private fun getBestName(uri: Uri, index: Int = -1): String {
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) c.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
                 }
             }
         } catch (_: Exception) {}
 
-        // 3) MediaStore _data column
+        uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let { return it }
+        return if (index >= 0) "File_$index" else "SharedFile_${System.currentTimeMillis()}"
+    }
+
+    private fun getRealAbsolutePath(uri: Uri): String {
+        if (uri.scheme == "file") return uri.path ?: uri.toString()
+
         try {
             contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
                 if (c.moveToFirst()) {
@@ -193,17 +215,7 @@ class ShareActivity : Activity() {
                 }
             }
         } catch (_: Exception) {}
-        
-        // 4) Fallback to decoded URI path if it looks like a file path
-        try {
-            val decodedPath = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
-            if (decodedPath.contains("/storage/")) {
-                val extracted = "/storage/" + decodedPath.substringAfter("/storage/")
-                return extracted
-            }
-        } catch (_: Exception) {}
 
-        // 5) Absolute last fallback: the original URI string
         return uri.toString()
     }
 
