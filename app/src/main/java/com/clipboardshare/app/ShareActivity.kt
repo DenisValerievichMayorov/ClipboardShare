@@ -52,17 +52,29 @@ class ShareActivity : Activity() {
     }
 
     private fun handleSendMultiple(intent: Intent) {
+        val texts = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
+        if (texts != null && texts.isNotEmpty()) {
+            val combined = texts.filter { !it.isNullOrBlank() }.joinToString("\n\n---\n\n")
+            if (combined.isNotBlank()) {
+                copyToClipboard(combined, "✅ Скопировано текстовых фрагментов: ${texts.size}")
+                return
+            }
+        }
+
         val uris: ArrayList<Uri>? = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
         if (uris != null && uris.isNotEmpty()) {
             val stringBuilder = java.lang.StringBuilder()
             var processedCount = 0
             for (uri in uris) {
-                val mimeType = contentResolver.getType(uri) ?: "*/*"
+                val mimeType = contentResolver.getType(uri) ?: intent.type ?: "*/*"
                 val result = processFile(uri, mimeType)
+                
+                val textToAppend = result.text.takeIf { it.isNotBlank() } ?: uri.toString()
+                
                 if (processedCount > 0) {
                     stringBuilder.append("\n\n---\n\n")
                 }
-                stringBuilder.append(result.text)
+                stringBuilder.append(textToAppend)
                 processedCount++
             }
             copyToClipboard(stringBuilder.toString(), "✅ Скопировано файлов: $processedCount")
@@ -75,12 +87,15 @@ class ShareActivity : Activity() {
     private data class ProcessResult(val text: String, val message: String)
 
     private fun processFile(uri: Uri, mimeType: String): ProcessResult {
-        val fileName = getDisplayName(uri) ?: uri.lastPathSegment ?: uri.toString()
+        var fileName = getDisplayName(uri)
+        if (fileName.isNullOrEmpty()) fileName = uri.lastPathSegment
+        if (fileName.isNullOrEmpty()) fileName = uri.toString()
+
         try {
             val isTextFile = isTextMimeType(mimeType) || isTextByExtension(uri)
 
             if (!isTextFile) {
-                return ProcessResult(fileName, "📁 Имя файла скопировано!")
+                return ProcessResult(fileName!!, "📁 Имя файла скопировано!")
             }
 
             val content = contentResolver.openInputStream(uri)?.use { stream ->
@@ -89,15 +104,17 @@ class ShareActivity : Activity() {
 
             if (content != null) {
                 if (content.length > 1_000_000) {
-                    return ProcessResult(fileName, "⚠️ Файл слишком большой, скопировано имя")
+                    return ProcessResult(fileName!!, "⚠️ Файл слишком большой, скопировано имя")
+                } else if (content.isBlank()) {
+                    return ProcessResult(fileName!!, "⚠️ Файл пуст, скопировано имя")
                 } else {
                     return ProcessResult(content, "✅ Содержимое файла скопировано!\n(${content.length} символов)")
                 }
             } else {
-                return ProcessResult(fileName, "❌ Не удалось прочитать файл, скопировано имя")
+                return ProcessResult(fileName!!, "❌ Не удалось прочитать файл, скопировано имя")
             }
         } catch (e: Exception) {
-            return ProcessResult(fileName, "⚠️ Ошибка чтения, скопировано имя")
+            return ProcessResult(fileName!!, "⚠️ Ошибка чтения, скопировано имя")
         }
     }
 
@@ -135,11 +152,15 @@ class ShareActivity : Activity() {
                 contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) {
                         val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (idx >= 0) return cursor.getString(idx)
+                        if (idx >= 0) {
+                            val name = cursor.getString(idx)
+                            if (!name.isNullOrEmpty()) return name
+                        }
                     }
                 }
             } else if (uri.scheme == "file") {
-                return uri.lastPathSegment
+                val name = uri.lastPathSegment
+                if (!name.isNullOrEmpty()) return name
             }
         } catch (e: Exception) {
             // Ignore
