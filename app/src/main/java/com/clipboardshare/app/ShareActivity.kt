@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.widget.Toast
 
 class ShareActivity : Activity() {
@@ -16,6 +17,7 @@ class ShareActivity : Activity() {
 
         when (intent?.action) {
             Intent.ACTION_SEND -> handleSend(intent)
+            Intent.ACTION_SEND_MULTIPLE -> handleSendMultiple(intent)
             else -> {
                 showToast("❌ Неизвестный тип данных")
                 finish()
@@ -26,8 +28,7 @@ class ShareActivity : Activity() {
     private fun handleSend(intent: Intent) {
         val mimeType = intent.type ?: ""
 
-        // Handle plain text (shared from browser, apps, etc.)
-        if (mimeType == "text/plain") {
+        if (mimeType == "text/plain" && intent.hasExtra(Intent.EXTRA_TEXT)) {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!text.isNullOrEmpty()) {
                 copyToClipboard(text, "Текст скопирован!")
@@ -35,12 +36,11 @@ class ShareActivity : Activity() {
             }
         }
 
-        // Handle file URI (shared from file manager)
         val fileUri: Uri? = intent.getParcelableExtra(Intent.EXTRA_STREAM)
         if (fileUri != null) {
-            readFileAndCopy(fileUri, mimeType)
+            val result = processFile(fileUri, mimeType)
+            copyToClipboard(result.text, result.message)
         } else {
-            // Try EXTRA_TEXT as fallback
             val fallbackText = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!fallbackText.isNullOrEmpty()) {
                 copyToClipboard(fallbackText, "Текст скопирован!")
@@ -51,38 +51,53 @@ class ShareActivity : Activity() {
         }
     }
 
-    private fun readFileAndCopy(uri: Uri, mimeType: String) {
+    private fun handleSendMultiple(intent: Intent) {
+        val uris: ArrayList<Uri>? = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+        if (uris != null && uris.isNotEmpty()) {
+            val stringBuilder = java.lang.StringBuilder()
+            var processedCount = 0
+            for (uri in uris) {
+                val mimeType = contentResolver.getType(uri) ?: "*/*"
+                val result = processFile(uri, mimeType)
+                if (processedCount > 0) {
+                    stringBuilder.append("\n\n---\n\n")
+                }
+                stringBuilder.append(result.text)
+                processedCount++
+            }
+            copyToClipboard(stringBuilder.toString(), "✅ Скопировано файлов: $processedCount")
+        } else {
+            showToast("❌ Нет файлов для копирования")
+            finish()
+        }
+    }
+
+    private data class ProcessResult(val text: String, val message: String)
+
+    private fun processFile(uri: Uri, mimeType: String): ProcessResult {
+        val fileName = getDisplayName(uri) ?: uri.lastPathSegment ?: uri.toString()
         try {
-            // Check if it's likely a text/code file
             val isTextFile = isTextMimeType(mimeType) || isTextByExtension(uri)
 
             if (!isTextFile) {
-                // For binary files - copy the URI/path as text
-                val path = getRealPath(uri) ?: uri.toString()
-                copyToClipboard(path, "📁 Путь к файлу скопирован!")
-                return
+                return ProcessResult(fileName, "📁 Имя файла скопировано!")
             }
 
-            // Read file content
             val content = contentResolver.openInputStream(uri)?.use { stream ->
                 stream.bufferedReader(Charsets.UTF_8).readText()
             }
 
             if (content != null) {
                 if (content.length > 1_000_000) {
-                    // Too large - copy just the path
-                    val path = getRealPath(uri) ?: uri.toString()
-                    copyToClipboard(path, "⚠️ Файл слишком большой, скопирован путь")
+                    return ProcessResult(fileName, "⚠️ Файл слишком большой, скопировано имя")
                 } else {
-                    copyToClipboard(content, "✅ Содержимое файла скопировано!\n(${content.length} символов)")
+                    return ProcessResult(content, "✅ Содержимое файла скопировано!\n(${content.length} символов)")
                 }
             } else {
-                showToast("❌ Не удалось прочитать файл")
-                finish()
+                return ProcessResult(fileName, "❌ Не удалось прочитать файл, скопировано имя")
             }
         } catch (e: Exception) {
-            // Fallback: copy URI string
-            copyToClipboard(uri.toString(), "⚠️ Скопирован URI файла")
+            return ProcessResult(fileName, "⚠️ Ошибка чтения, скопировано имя")
         }
     }
 
@@ -99,7 +114,7 @@ class ShareActivity : Activity() {
     }
 
     private fun isTextByExtension(uri: Uri): Boolean {
-        val path = uri.path ?: uri.lastPathSegment ?: return false
+        val path = getDisplayName(uri) ?: uri.path ?: uri.lastPathSegment ?: return false
         val textExtensions = setOf(
             "txt", "md", "markdown", "log", "csv", "tsv",
             "json", "xml", "html", "htm", "css", "js", "ts",
@@ -114,23 +129,22 @@ class ShareActivity : Activity() {
         return ext in textExtensions
     }
 
-    private fun getRealPath(uri: Uri): String? {
-        return try {
-            when (uri.scheme) {
-                "file" -> uri.path
-                "content" -> {
-                    contentResolver.query(uri, arrayOf("_data"), null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val idx = cursor.getColumnIndex("_data")
-                            if (idx >= 0) cursor.getString(idx) else null
-                        } else null
+    private fun getDisplayName(uri: Uri): String? {
+        try {
+            if (uri.scheme == "content") {
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) return cursor.getString(idx)
                     }
                 }
-                else -> null
+            } else if (uri.scheme == "file") {
+                return uri.lastPathSegment
             }
         } catch (e: Exception) {
-            null
+            // Ignore
         }
+        return null
     }
 
     private fun copyToClipboard(text: String, message: String) {
